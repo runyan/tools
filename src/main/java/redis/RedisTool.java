@@ -29,15 +29,18 @@ public class RedisTool implements AutoCloseable {
     private final JedisPool srcJedisPool;
     private final JedisPool destJedisPool;
 
-    private int num = 0;
-    private ExecutorService executorService;
-
     public RedisTool(RedisConfig srcRedisConfig, RedisConfig destRedisConfig) {
+        if(Objects.isNull(srcRedisConfig)) {
+            throw new NullPointerException("Source Redis config cannot be null");
+        }
+        if(Objects.isNull(destRedisConfig)) {
+            throw new NullPointerException("Destination Redis config cannot be null");
+        }
         srcJedisPool = initJedisPool(srcRedisConfig);
         destJedisPool = initJedisPool(destRedisConfig);
     }
 
-    private static JedisPool initJedisPool(RedisConfig redisConfig) {
+    private JedisPool initJedisPool(RedisConfig redisConfig) {
         GenericObjectPoolConfig redisPoolConfig = new GenericObjectPoolConfig();
         int maxIdle = redisConfig.getMaxIdle();
         if(maxIdle > 0) {
@@ -72,16 +75,16 @@ public class RedisTool implements AutoCloseable {
 
     @Override
     public void close() {
-        num = 0;
-        if(null != executorService) {
-            executorService.shutdown();
+        if(Objects.nonNull(srcJedisPool) && !srcJedisPool.isClosed()) {
+            srcJedisPool.close();
         }
-        srcJedisPool.close();
-        destJedisPool.close();
+        if(Objects.nonNull(destJedisPool) && !destJedisPool.isClosed()) {
+            destJedisPool.close();
+        }
     }
 
     private void closeJedis(Jedis jedis) {
-        if(null != jedis) {
+        if(Objects.nonNull(jedis) && jedis.isConnected()) {
             jedis.disconnect();
             jedis.close();
         }
@@ -134,7 +137,7 @@ public class RedisTool implements AutoCloseable {
     }
 
     private void handleData(List<String> keyList) {
-        if(null == keyList || keyList.isEmpty()) {
+        if(Objects.isNull(keyList) || keyList.isEmpty()) {
             log.warn("empty keys");
             return;
         }
@@ -148,16 +151,17 @@ public class RedisTool implements AutoCloseable {
     }
 
     private void useSingleThread(List<String> keyList) {
-        if(null == keyList || keyList.isEmpty()) {
+        if(Objects.isNull(keyList) || keyList.isEmpty()) {
             log.warn("empty keys");
             return;
         }
-        log.info("using single thread");
+        log.info("using single thread transfer");
         Jedis srcJedis = srcJedisPool.getResource();
         Jedis destJedis = destJedisPool.getResource();
         long ttl;
         boolean shouldContinue;
         String type;
+        int num = 0;
         for(String key : keyList) {
             if(!destJedis.exists(key)) {
                 type = srcJedis.type(key);
@@ -172,11 +176,11 @@ public class RedisTool implements AutoCloseable {
                     destJedis.expireAt(key, calculateUnixTime(ttl));
                 }
                 num++;
-                log.info("Num of data added: {}", num);
             } else {
                 log.info("{} already exists", key);
             }
         }
+        log.info("Num of data added: {}", num);
         closeJedis(destJedis);
         closeJedis(srcJedis);
     }
@@ -187,8 +191,8 @@ public class RedisTool implements AutoCloseable {
         int pageNum = pages == 0 ? tempPageNum : tempPageNum + 1;
         List<String> subList;
         int endIndex;
-        log.info("using multi-thread, thread num: {}", pageNum);
-        executorService = Executors.newFixedThreadPool(pageNum);
+        log.info("using multi-thread transfer, thread num: {}", pageNum);
+        ExecutorService executorService = Executors.newFixedThreadPool(pageNum);
         CountDownLatch countDownLatch = new CountDownLatch(pageNum);
         for(int i = 0; i < pageNum; i++) {
             endIndex = (i + 1) * MAX_NUM_PER_THREAD;
@@ -201,20 +205,22 @@ public class RedisTool implements AutoCloseable {
         } catch (InterruptedException e) {
             log.error("exception while countDownlatch awaits: {}", e);
             Thread.currentThread().interrupt();
+        } finally {
+            executorService.shutdown();
         }
     }
 
     private void addData(String key, String type, Jedis srcJedis, Jedis destJedis) {
-        if(null == key || key.isEmpty()) {
+        if(Objects.isNull(key) || key.isEmpty()) {
             throw new NullPointerException("empty key");
         }
-        if(null == type || type.isEmpty()) {
+        if(Objects.isNull(type) || type.isEmpty()) {
             throw new NullPointerException("empty type");
         }
-        if(null == srcJedis) {
+        if(Objects.isNull(srcJedis)) {
             throw new NullPointerException("null srcJedis");
         }
-        if(null == destJedis) {
+        if(Objects.isNull(destJedis)) {
             throw new NullPointerException("null destJedis");
         }
         switch (type) {
@@ -236,12 +242,12 @@ public class RedisTool implements AutoCloseable {
                 destJedis.sadd(key, setArr);
                 break;
             default:
-                throw new IllegalStateException(type);
+                throw new IllegalStateException("unsupported type: " + type);
         }
     }
 
     private String[] collectionToArray(Collection<String> collection) {
-        if(null == collection || collection.isEmpty()) {
+        if(Objects.isNull(collection) || collection.isEmpty()) {
             throw new NullPointerException("null collection");
         }
         String[] arr = new String[collection.size()];
@@ -249,10 +255,10 @@ public class RedisTool implements AutoCloseable {
     }
 
     private List<String> scanKeys(String key, Jedis jedis) {
-        if(null == key || key.isEmpty()) {
+        if(Objects.isNull(key) || key.isEmpty()) {
             throw new NullPointerException("empty key");
         }
-        if(null == jedis) {
+        if(Objects.isNull(jedis)) {
             throw new NullPointerException("null jedis");
         }
         List<String> keyList = new ArrayList<>(MAX_NUM_PER_THREAD);
@@ -265,7 +271,7 @@ public class RedisTool implements AutoCloseable {
         do {
             scanResult = jedis.scan(cursor, scanParams);
             keys = scanResult.getResult();
-            if(null != keys && !keys.isEmpty()) {
+            if(Objects.nonNull(keys) && !keys.isEmpty()) {
                 keyList.addAll(keys);
             }
             cursor = scanResult.getCursor();

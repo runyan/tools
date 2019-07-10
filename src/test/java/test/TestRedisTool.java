@@ -41,7 +41,7 @@ public class TestRedisTool {
         try (RedisTool tool = new RedisTool(srcConfig, destConfig)) {
             long startTime = LocalDateTime.now().toEpochSecond(ZoneOffset.ofHours(8));
             String key = "DISTRIBUTION:CACHE:*";
-            tool.syncAdditionalData(key);
+            tool.transferKnownKeyPatternData(key);
             long endTime = LocalDateTime.now().toEpochSecond(ZoneOffset.ofHours(8));
             log.info("total time: {} s", (endTime - startTime));
         }
