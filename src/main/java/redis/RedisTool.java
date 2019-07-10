@@ -11,22 +11,50 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
+ * A tool to transfer data from a source Redis to a target Redis
+ *
  * @author yanrun
  **/
 @Slf4j
 @SuppressWarnings({"unused"})
 public class RedisTool implements AutoCloseable {
 
+    /**
+     * default timeout
+     */
     private static final int DEFAULT_TIMEOUT = 3600 * 1000;
+    /**
+     * default port
+     */
     private static final int DEFAULT_PORT = 6379;
+    /**
+     * default Redis database
+     */
     private static final int DEFAULT_DATABASE = 0;
 
+    /**
+     * used to check the result of {@link redis.clients.jedis.Jedis#ttl}
+     * this value represents a key which never expired
+     */
     private static final int KEY_NEVER_EXPIRED = -1;
+    /**
+     * used to check the result of {@link redis.clients.jedis.Jedis#ttl}
+     * this value represents a key does not exists
+     */
     private static final int KEY_NOT_EXISTS = -2;
 
+    /**
+     * used by {@link redis.RedisTool#handleData} to determine whether to use multi-thread mode or not
+     */
     private static final int MAX_NUM_PER_THREAD = 10000;
 
+    /**
+     * source Redis connection pool
+     */
     private final JedisPool srcJedisPool;
+    /**
+     * target Redis connection pool
+     */
     private final JedisPool destJedisPool;
 
     public RedisTool(RedisConfig srcRedisConfig, RedisConfig destRedisConfig) {
@@ -40,6 +68,12 @@ public class RedisTool implements AutoCloseable {
         destJedisPool = initJedisPool(destRedisConfig);
     }
 
+    /**
+     * Init Redis poll config
+     *
+     * @param redisConfig config to be used
+     * @return Redis poll after configuration
+     */
     private JedisPool initJedisPool(RedisConfig redisConfig) {
         GenericObjectPoolConfig redisPoolConfig = new GenericObjectPoolConfig();
         int maxIdle = redisConfig.getMaxIdle();
@@ -73,6 +107,9 @@ public class RedisTool implements AutoCloseable {
         return new JedisPool(redisPoolConfig, host, port, timeout, password, database);
     }
 
+    /**
+     * Close the used Redis pools
+     */
     @Override
     public void close() {
         if(Objects.nonNull(srcJedisPool) && !srcJedisPool.isClosed()) {
@@ -83,6 +120,11 @@ public class RedisTool implements AutoCloseable {
         }
     }
 
+    /**
+     * Close and release jedis connection
+     *
+     * @param jedis jedis to be closed
+     */
     private void closeJedis(Jedis jedis) {
         if(Objects.nonNull(jedis) && jedis.isConnected()) {
             jedis.disconnect();
@@ -90,7 +132,14 @@ public class RedisTool implements AutoCloseable {
         }
     }
 
-    public void transferKnownKeyData(String key) {
+    /**
+     * Transfer data of a known key from source to destination
+     *
+     * @param key Redis key
+     * @param shouldDeleteOnFind  if true and the key already exists in target Redis,
+     *                            data in target Redis will be deleted
+     */
+    public void transferKnownKeyData(String key, boolean shouldDeleteOnFind) {
         Jedis srcJedis = srcJedisPool.getResource();
         Jedis destJedis = destJedisPool.getResource();
         long ttl = srcJedis.ttl(key);
@@ -98,6 +147,9 @@ public class RedisTool implements AutoCloseable {
             throw new IllegalArgumentException(key + " does not exists");
         }
         String type = srcJedis.type(key);
+        if(destJedis.exists(key) && shouldDeleteOnFind) {
+            destJedis.del(key);
+        }
         addData(key, type, srcJedis, destJedis);
         if(ttl != KEY_NEVER_EXPIRED) {
             destJedis.expireAt(key, calculateUnixTime(ttl));
@@ -106,6 +158,11 @@ public class RedisTool implements AutoCloseable {
         closeJedis(srcJedis);
     }
 
+    /**
+     * Transfer data of a known key pattern from source to destination
+     *
+     * @param keyPattern Redis key pattern
+     */
     public void transferKnownKeyPatternData(String keyPattern) {
         Jedis srcJedis = srcJedisPool.getResource();
         List<String> keys = scanKeys(keyPattern, srcJedis);
@@ -113,6 +170,11 @@ public class RedisTool implements AutoCloseable {
         closeJedis(srcJedis);
     }
 
+    /**
+     * Add newly added data to destination
+     *
+     * @param keyPattern Redis key pattern
+     */
     public void syncAdditionalData(String keyPattern) {
         Jedis srcJedis = srcJedisPool.getResource();
         Jedis destJedis = destJedisPool.getResource();
@@ -127,6 +189,13 @@ public class RedisTool implements AutoCloseable {
         closeJedis(srcJedis);
     }
 
+    /**
+     * Check existence of a Redis key and determine whether should continue parse this key
+     *
+     * @param key Redis key
+     * @param ttl time to live
+     * @return should continue parse this key
+     */
     private boolean handleTimeToLive(String key, long ttl) {
         boolean shouldContinue = true;
         if(ttl == KEY_NOT_EXISTS) {
@@ -136,6 +205,11 @@ public class RedisTool implements AutoCloseable {
         return shouldContinue;
     }
 
+    /**
+     * Check Redis keys and choose which mode to use(single-thread or multi-thread)
+     *
+     * @param keyList Redis key list
+     */
     private void handleData(List<String> keyList) {
         if(Objects.isNull(keyList) || keyList.isEmpty()) {
             log.warn("empty keys");
@@ -150,6 +224,11 @@ public class RedisTool implements AutoCloseable {
         useSingleThread(keyList);
     }
 
+    /**
+     * Use single thread to transfer data
+     *
+     * @param keyList Redis key list
+     */
     private void useSingleThread(List<String> keyList) {
         if(Objects.isNull(keyList) || keyList.isEmpty()) {
             log.warn("empty keys");
@@ -185,6 +264,11 @@ public class RedisTool implements AutoCloseable {
         closeJedis(srcJedis);
     }
 
+    /**
+     * Use multi-thread to transfer data
+     *
+     * @param keyList Redis key list
+     */
     private void useMultiThread(List<String> keyList, int totalItems) {
         int pages = totalItems % MAX_NUM_PER_THREAD;
         int tempPageNum = totalItems / MAX_NUM_PER_THREAD;
@@ -210,6 +294,14 @@ public class RedisTool implements AutoCloseable {
         }
     }
 
+    /**
+     * Transfer data from source Redis to target Redis
+     *
+     * @param key Redis key
+     * @param type type of the Redis data
+     * @param srcJedis source Redis
+     * @param destJedis target Redis
+     */
     private void addData(String key, String type, Jedis srcJedis, Jedis destJedis) {
         if(Objects.isNull(key) || key.isEmpty()) {
             throw new NullPointerException("empty key");
@@ -246,6 +338,12 @@ public class RedisTool implements AutoCloseable {
         }
     }
 
+    /**
+     * Convert type from java.util.Collection to String array
+     *
+     * @param collection collection to be parsed
+     * @return String array transformed from collection
+     */
     private String[] collectionToArray(Collection<String> collection) {
         if(Objects.isNull(collection) || collection.isEmpty()) {
             throw new NullPointerException("null collection");
@@ -254,9 +352,16 @@ public class RedisTool implements AutoCloseable {
         return collection.toArray(arr);
     }
 
-    private List<String> scanKeys(String key, Jedis jedis) {
-        if(Objects.isNull(key) || key.isEmpty()) {
-            throw new NullPointerException("empty key");
+    /**
+     * Get keys of a certain pattern from source Redis
+     *
+     * @param keyPattern key pattern
+     * @param jedis source Redis
+     * @return keys
+     */
+    private List<String> scanKeys(String keyPattern, Jedis jedis) {
+        if(Objects.isNull(keyPattern) || keyPattern.isEmpty()) {
+            throw new NullPointerException("empty keyPattern");
         }
         if(Objects.isNull(jedis)) {
             throw new NullPointerException("null jedis");
@@ -265,7 +370,7 @@ public class RedisTool implements AutoCloseable {
         String cursor = ScanParams.SCAN_POINTER_START;
         ScanParams scanParams = new ScanParams();
         scanParams.count(100000);
-        scanParams.match(key);
+        scanParams.match(keyPattern);
         List<String> keys;
         ScanResult<String> scanResult;
         do {
@@ -280,11 +385,21 @@ public class RedisTool implements AutoCloseable {
         return keyList;
     }
 
+    /**
+     * Get the Unix timestamp based on current time and time to live of a Redis data,
+     * i.e. to determine when the data should expired
+     *
+     * @param ttl time to live
+     * @return Unix timestamp when the data should expired
+     */
     private long calculateUnixTime(long ttl) {
         long currentTime = System.currentTimeMillis() / 1000;
         return currentTime + ttl;
     }
 
+    /**
+     * Used by {@link redis.RedisTool#handleData} in multi-thread mode, transfer partial data to target Redis
+     */
     private final class SubTask implements Runnable {
 
         private List<String> keyList;
