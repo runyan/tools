@@ -57,6 +57,15 @@ public class RedisTool implements AutoCloseable {
      */
     private final JedisPool destJedisPool;
 
+    /**
+     * source Redis
+     */
+    private final Jedis srcJedis;
+    /**
+     * target Redis
+     */
+    private final Jedis destJedis;
+
     public RedisTool(RedisConfig srcRedisConfig, RedisConfig destRedisConfig) {
         if(Objects.isNull(srcRedisConfig)) {
             throw new NullPointerException("Source Redis config cannot be null");
@@ -66,6 +75,8 @@ public class RedisTool implements AutoCloseable {
         }
         srcJedisPool = initJedisPool(srcRedisConfig);
         destJedisPool = initJedisPool(destRedisConfig);
+        srcJedis = srcJedisPool.getResource();
+        destJedis = destJedisPool.getResource();
     }
 
     /**
@@ -112,12 +123,35 @@ public class RedisTool implements AutoCloseable {
      */
     @Override
     public void close() {
-        if(Objects.nonNull(srcJedisPool) && !srcJedisPool.isClosed()) {
-            srcJedisPool.close();
+        closeJedises();
+        closeJedisPools();
+    }
+
+    /**
+     * Close Jedis pools
+     */
+    private void closeJedisPools() {
+        closeJedisPool(srcJedisPool);
+        closeJedisPool(destJedisPool);
+    }
+
+    /**
+     * Close a Jedis pool
+     *
+     * @param jedisPool Jedis pool to be closed
+     */
+    private void closeJedisPool(JedisPool jedisPool) {
+        if(Objects.nonNull(jedisPool) && !jedisPool.isClosed()) {
+            jedisPool.close();
         }
-        if(Objects.nonNull(destJedisPool) && !destJedisPool.isClosed()) {
-            destJedisPool.close();
-        }
+    }
+
+    /**
+     * Close jedis connections
+     */
+    private void closeJedises() {
+        closeJedis(srcJedis);
+        closeJedis(destJedis);
     }
 
     /**
@@ -140,8 +174,6 @@ public class RedisTool implements AutoCloseable {
      *                            data in target Redis will be deleted
      */
     public void transferKnownKeyData(String key, boolean shouldDeleteOnFind) {
-        Jedis srcJedis = srcJedisPool.getResource();
-        Jedis destJedis = destJedisPool.getResource();
         long ttl = srcJedis.ttl(key);
         if(ttl == KEY_NOT_EXISTS) {
             throw new IllegalArgumentException(key + " does not exists");
@@ -154,8 +186,6 @@ public class RedisTool implements AutoCloseable {
         if(ttl != KEY_NEVER_EXPIRED) {
             destJedis.expireAt(key, calculateUnixTime(ttl));
         }
-        closeJedis(destJedis);
-        closeJedis(srcJedis);
     }
 
     /**
@@ -164,10 +194,8 @@ public class RedisTool implements AutoCloseable {
      * @param keyPattern Redis key pattern
      */
     public void transferKnownKeyPatternData(String keyPattern) {
-        Jedis srcJedis = srcJedisPool.getResource();
         List<String> keys = scanKeys(keyPattern, srcJedis);
         handleData(keys);
-        closeJedis(srcJedis);
     }
 
     /**
@@ -176,8 +204,6 @@ public class RedisTool implements AutoCloseable {
      * @param keyPattern Redis key pattern
      */
     public void syncAdditionalData(String keyPattern) {
-        Jedis srcJedis = srcJedisPool.getResource();
-        Jedis destJedis = destJedisPool.getResource();
         List<String> secKeys = scanKeys(keyPattern, srcJedis);
         log.info("source db key size: {}", secKeys.size());
         List<String> destKeys = scanKeys(keyPattern, destJedis);
@@ -185,8 +211,6 @@ public class RedisTool implements AutoCloseable {
         secKeys.removeAll(destKeys);
         log.info("num of data need to be transferred: {}", secKeys.size());
         handleData(secKeys);
-        closeJedis(destJedis);
-        closeJedis(srcJedis);
     }
 
     /**
@@ -235,8 +259,6 @@ public class RedisTool implements AutoCloseable {
             return;
         }
         log.info("using single thread transfer");
-        Jedis srcJedis = srcJedisPool.getResource();
-        Jedis destJedis = destJedisPool.getResource();
         long ttl;
         boolean shouldContinue;
         String type;
@@ -260,8 +282,6 @@ public class RedisTool implements AutoCloseable {
             }
         }
         log.info("Num of data added: {}", num);
-        closeJedis(destJedis);
-        closeJedis(srcJedis);
     }
 
     /**
@@ -404,34 +424,36 @@ public class RedisTool implements AutoCloseable {
 
         private List<String> keyList;
         private CountDownLatch countDownLatch;
+        private Jedis sourceJedis;
+        private Jedis targetJedis;
 
         SubTask(List<String> keyList, CountDownLatch countDownLatch) {
             this.keyList = keyList;
             this.countDownLatch = countDownLatch;
+            sourceJedis = srcJedisPool.getResource();
+            targetJedis = destJedisPool.getResource();
         }
 
         @Override
         public void run() {
             String threadName = Thread.currentThread().getName();
-            Jedis srcJedis = srcJedisPool.getResource();
-            Jedis destJedis = destJedisPool.getResource();
             int numOfAdded = 0;
             try {
-                srcJedis.connect();
-                destJedis.connect();
+                sourceJedis.connect();
+                targetJedis.connect();
                 String type;
                 long ttl;
                 for(String key : keyList) {
-                    if(!destJedis.exists(key)) {
-                        type = srcJedis.type(key);
-                        ttl = srcJedis.ttl(key.trim());
+                    if(!targetJedis.exists(key)) {
+                        type = sourceJedis.type(key);
+                        ttl = sourceJedis.ttl(key.trim());
                         if(!handleTimeToLive(key, ttl)) {
                             continue;
                         }
-                        addData(key, type, srcJedis, destJedis);
+                        addData(key, type, sourceJedis, targetJedis);
                         log.info("{} added key: {}", threadName, key);
                         if(ttl > 0) {
-                            destJedis.expireAt(key, calculateUnixTime(ttl));
+                            targetJedis.expireAt(key, calculateUnixTime(ttl));
                         }
                         numOfAdded++;
                     } else {
@@ -444,9 +466,13 @@ public class RedisTool implements AutoCloseable {
                 countDownLatch.countDown();
                 log.info("Thread: {}, number of data added: {}", threadName, numOfAdded);
                 log.info("{} countDownlatch: {}", threadName, countDownLatch.getCount());
-                closeJedis(destJedis);
-                closeJedis(srcJedis);
+                closeJedisConnections();
             }
+        }
+
+        private void closeJedisConnections() {
+            closeJedis(targetJedis);
+            closeJedis(sourceJedis);
         }
     }
 
