@@ -75,7 +75,7 @@ public class RedisTool implements AutoCloseable {
     /**
      * target Redis connection pool
      */
-    private final JedisPool destJedisPool;
+    private final JedisPool targetJedisPool;
 
     /**
      * source Redis
@@ -84,19 +84,19 @@ public class RedisTool implements AutoCloseable {
     /**
      * target Redis
      */
-    private final Jedis destJedis;
+    private final Jedis targetJedis;
 
-    public RedisTool(RedisConfig srcRedisConfig, RedisConfig destRedisConfig) {
+    public RedisTool(RedisConfig srcRedisConfig, RedisConfig targetRedisConfig) {
         if(Objects.isNull(srcRedisConfig)) {
             throw new NullPointerException("Source Redis config cannot be null");
         }
-        if(Objects.isNull(destRedisConfig)) {
-            throw new NullPointerException("Destination Redis config cannot be null");
+        if(Objects.isNull(targetRedisConfig)) {
+            throw new NullPointerException("Target Redis config cannot be null");
         }
         srcJedisPool = initJedisPool(srcRedisConfig);
-        destJedisPool = initJedisPool(destRedisConfig);
+        targetJedisPool = initJedisPool(targetRedisConfig);
         srcJedis = srcJedisPool.getResource();
-        destJedis = destJedisPool.getResource();
+        targetJedis = targetJedisPool.getResource();
     }
 
     /**
@@ -139,11 +139,20 @@ public class RedisTool implements AutoCloseable {
     }
 
     /**
+     * Return the total amount of data transferred
+     *
+     * @return total amount of data transferred
+     */
+    public int getTotalNumOfDataTransferred() {
+        return totalNum.intValue();
+    }
+
+    /**
      * Close the used Redis pools
      */
     @Override
     public void close() {
-        closeJedises();
+        closeJedisConnections();
         closeJedisPools();
     }
 
@@ -152,7 +161,7 @@ public class RedisTool implements AutoCloseable {
      */
     private void closeJedisPools() {
         closeJedisPool(srcJedisPool);
-        closeJedisPool(destJedisPool);
+        closeJedisPool(targetJedisPool);
     }
 
     /**
@@ -169,9 +178,9 @@ public class RedisTool implements AutoCloseable {
     /**
      * Close jedis connections
      */
-    private void closeJedises() {
+    private void closeJedisConnections() {
         closeJedis(srcJedis);
-        closeJedis(destJedis);
+        closeJedis(targetJedis);
     }
 
     /**
@@ -187,7 +196,7 @@ public class RedisTool implements AutoCloseable {
     }
 
     /**
-     * Transfer data of a known key from source to destination
+     * Transfer data of a known key from source to target
      *
      * @param key Redis key
      * @param shouldDeleteOnFind  if true and the key already exists in target Redis,
@@ -199,17 +208,17 @@ public class RedisTool implements AutoCloseable {
             throw new IllegalArgumentException(key + " does not exists");
         }
         String type = srcJedis.type(key);
-        if(destJedis.exists(key) && shouldDeleteOnFind) {
-            destJedis.del(key);
+        if(targetJedis.exists(key) && shouldDeleteOnFind) {
+            targetJedis.del(key);
         }
-        addData(key, type, srcJedis, destJedis);
+        addData(key, type, srcJedis, targetJedis);
         if(ttl != KEY_NEVER_EXPIRED) {
-            destJedis.expireAt(key, calculateUnixTime(ttl));
+            targetJedis.expireAt(key, calculateUnixTime(ttl));
         }
     }
 
     /**
-     * Transfer data of a known key pattern from source to destination
+     * Transfer data of a known key pattern from source Redis to target Redis
      *
      * @param keyPattern Redis key pattern
      */
@@ -219,18 +228,23 @@ public class RedisTool implements AutoCloseable {
     }
 
     /**
-     * Add newly added data to destination
+     * Add newly added data to target Redis
      *
      * @param keyPattern Redis key pattern
      */
     public void syncAdditionalData(String keyPattern) {
-        List<String> secKeys = scanKeys(keyPattern, srcJedis);
-        log.info("source db key size: {}", secKeys.size());
-        List<String> destKeys = scanKeys(keyPattern, destJedis);
-        log.info("destination db key size: {}", destKeys.size());
-        secKeys.removeAll(destKeys);
-        log.info("num of data need to be transferred: {}", secKeys.size());
-        handleData(secKeys);
+        List<String> srcKeys = scanKeys(keyPattern, srcJedis);
+        int srcKeySize = srcKeys.size();
+        if(srcKeySize == 0) {
+            log.warn("cannot find key pattern {} in source Redis", keyPattern);
+            return;
+        }
+        log.info("source db key size: {}", srcKeySize);
+        List<String> targetKeys = scanKeys(keyPattern, targetJedis);
+        log.info("target db key size: {}", targetKeys.size());
+        srcKeys.removeAll(targetKeys);
+        log.info("num of data need to be transferred: {}", srcKeys.size());
+        handleData(srcKeys);
     }
 
     /**
@@ -243,7 +257,7 @@ public class RedisTool implements AutoCloseable {
     private boolean handleTimeToLive(String key, long ttl) {
         boolean shouldContinue = true;
         if(ttl == KEY_NOT_EXISTS) {
-            log.info("{} expired", key);
+            log.info("key: {} expired", key);
             shouldContinue = false;
         }
         return shouldContinue;
@@ -284,7 +298,7 @@ public class RedisTool implements AutoCloseable {
         String type;
         int num = 0;
         for(String key : keyList) {
-            if(!destJedis.exists(key)) {
+            if(!targetJedis.exists(key)) {
                 type = srcJedis.type(key);
                 type = type.toLowerCase();
                 ttl = srcJedis.ttl(key);
@@ -292,13 +306,13 @@ public class RedisTool implements AutoCloseable {
                 if(!shouldContinue) {
                     continue;
                 }
-                addData(key, type, srcJedis, destJedis);
+                addData(key, type, srcJedis, targetJedis);
                 if(ttl > 0) {
-                    destJedis.expireAt(key, calculateUnixTime(ttl));
+                    targetJedis.expireAt(key, calculateUnixTime(ttl));
                 }
                 num++;
             } else {
-                log.info("{} already exists", key);
+                log.info("key: {} already exists", key);
             }
         }
         log.info("Num of data added: {}", num);
@@ -355,9 +369,9 @@ public class RedisTool implements AutoCloseable {
      * @param key Redis key
      * @param type type of the Redis data
      * @param srcJedis source Redis
-     * @param destJedis target Redis
+     * @param targetJedis target Redis
      */
-    private void addData(String key, String type, Jedis srcJedis, Jedis destJedis) {
+    private void addData(String key, String type, Jedis srcJedis, Jedis targetJedis) {
         if(Objects.isNull(key) || key.isEmpty()) {
             throw new NullPointerException("empty key");
         }
@@ -365,28 +379,28 @@ public class RedisTool implements AutoCloseable {
             throw new NullPointerException("empty type");
         }
         if(Objects.isNull(srcJedis)) {
-            throw new NullPointerException("null srcJedis");
+            throw new NullPointerException("source Jedis is null");
         }
-        if(Objects.isNull(destJedis)) {
-            throw new NullPointerException("null destJedis");
+        if(Objects.isNull(targetJedis)) {
+            throw new NullPointerException("target Jedis is null");
         }
         switch (type) {
             case "string":
-                destJedis.set(key, srcJedis.get(key));
+                targetJedis.set(key, srcJedis.get(key));
                 break;
             case "hash":
-                destJedis.hset(key, srcJedis.hgetAll(key));
+                targetJedis.hset(key, srcJedis.hgetAll(key));
                 break;
             case "list":
                 long length = srcJedis.llen(key);
                 List<String> list = srcJedis.lrange(key, 0, length);
                 String[] listArr = collectionToArray(list);
-                destJedis.rpush(key, listArr);
+                targetJedis.rpush(key, listArr);
                 break;
             case "set":
                 Set<String> set = srcJedis.smembers(key);
                 String[] setArr = collectionToArray(set);
-                destJedis.sadd(key, setArr);
+                targetJedis.sadd(key, setArr);
                 break;
             default:
                 throw new IllegalStateException("unsupported type: " + type);
@@ -401,7 +415,7 @@ public class RedisTool implements AutoCloseable {
      */
     private String[] collectionToArray(Collection<String> collection) {
         if(Objects.isNull(collection) || collection.isEmpty()) {
-            throw new NullPointerException("null collection");
+            throw new NullPointerException("collection is null");
         }
         String[] arr = new String[collection.size()];
         return collection.toArray(arr);
@@ -419,8 +433,9 @@ public class RedisTool implements AutoCloseable {
             throw new NullPointerException("empty keyPattern");
         }
         if(Objects.isNull(jedis)) {
-            throw new NullPointerException("null jedis");
+            throw new NullPointerException("cannot scan keys in a null jedis");
         }
+        log.info("begin to scan keys for pattern: {}", keyPattern);
         List<String> keyList = new ArrayList<>(MAX_NUM_PER_THREAD);
         String cursor = ScanParams.SCAN_POINTER_START;
         ScanParams scanParams = new ScanParams();
@@ -437,6 +452,7 @@ public class RedisTool implements AutoCloseable {
             cursor = scanResult.getCursor();
         } while (!"0".equalsIgnoreCase(cursor));
         keyList = new ArrayList<>(new HashSet<>(keyList));
+        log.info("finish scanning, num of keys: {}", keyList.size());
         return keyList;
     }
 
@@ -466,7 +482,7 @@ public class RedisTool implements AutoCloseable {
             this.keyList = keyList;
             this.countDownLatch = countDownLatch;
             sourceJedis = srcJedisPool.getResource();
-            targetJedis = destJedisPool.getResource();
+            targetJedis = targetJedisPool.getResource();
         }
 
         @Override
