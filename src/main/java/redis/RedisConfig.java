@@ -4,6 +4,9 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
+ * Redis config class
+ * properties to set: maxIdle, minIdle, maxTotal, host, port, timeout, password, database
+ *
  * @author yanrun
  **/
 @Builder
