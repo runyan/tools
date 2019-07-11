@@ -9,6 +9,7 @@ import redis.clients.jedis.ScanResult;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A tool to transfer data from a source Redis to a target Redis
@@ -47,6 +48,25 @@ public class RedisTool implements AutoCloseable {
      * used by {@link redis.RedisTool#handleData} to determine whether to use multi-thread mode or not
      */
     private static final int MAX_NUM_PER_THREAD = 10000;
+
+    /**
+     * max number of threads
+     */
+    private static final int MAX_THREAD_NUM = 500;
+
+    /**
+     * number of threads used by multi-thread mode
+     */
+    private int threadNum;
+    /**
+     * used by multi-thread mode, number of items handled by thread
+     */
+    private int itemPerThread;
+
+    /**
+     * used by multi-thread mode, accumulated number of data transferred
+     */
+    private AtomicInteger totalNum = new AtomicInteger(0);
 
     /**
      * source Redis connection pool
@@ -292,16 +312,21 @@ public class RedisTool implements AutoCloseable {
     private void useMultiThread(List<String> keyList, int totalItems) {
         int pages = totalItems % MAX_NUM_PER_THREAD;
         int tempPageNum = totalItems / MAX_NUM_PER_THREAD;
-        int pageNum = pages == 0 ? tempPageNum : tempPageNum + 1;
+        threadNum = pages == 0 ? tempPageNum : tempPageNum + 1;
         List<String> subList;
         int endIndex;
-        log.info("using multi-thread transfer, thread num: {}", pageNum);
-        ExecutorService executorService = Executors.newFixedThreadPool(pageNum);
-        CountDownLatch countDownLatch = new CountDownLatch(pageNum);
-        for(int i = 0; i < pageNum; i++) {
-            endIndex = (i + 1) * MAX_NUM_PER_THREAD;
+        if(threadNum > MAX_NUM_PER_THREAD) {
+            handleGiganticSize(totalItems);
+        } else {
+            itemPerThread = MAX_NUM_PER_THREAD;
+        }
+        log.info("using multi-thread transfer, thread num: {}", threadNum);
+        ExecutorService executorService = Executors.newFixedThreadPool(threadNum);
+        CountDownLatch countDownLatch = new CountDownLatch(threadNum);
+        for(int i = 0; i < threadNum; i++) {
+            endIndex = (i + 1) * itemPerThread;
             endIndex = endIndex > totalItems ? totalItems : endIndex;
-            subList = keyList.subList(i * MAX_NUM_PER_THREAD, endIndex);
+            subList = keyList.subList(i * itemPerThread, endIndex);
             executorService.submit(new SubTask(subList, countDownLatch));
         }
         try {
@@ -312,6 +337,16 @@ public class RedisTool implements AutoCloseable {
         } finally {
             executorService.shutdown();
         }
+    }
+
+    /**
+     * recalculate items handled per thread, to make sure thead number will not exceeds {@link redis.RedisTool#MAX_THREAD_NUM}
+     *
+     * @param totalItems total items
+     */
+    private void handleGiganticSize(int totalItems) {
+        threadNum = MAX_THREAD_NUM;
+        itemPerThread = totalItems / threadNum;
     }
 
     /**
@@ -456,6 +491,7 @@ public class RedisTool implements AutoCloseable {
                             targetJedis.expireAt(key, calculateUnixTime(ttl));
                         }
                         numOfAdded++;
+                        totalNum.getAndIncrement();
                     } else {
                         log.info("{} already exists", key);
                     }
