@@ -36,16 +36,22 @@ public class RedisTool implements AutoCloseable {
     /**
      * used to check the result of {@link redis.clients.jedis.Jedis#ttl(String)}
      * this value represents a key which never expired
+     *
+     * @see redis.clients.jedis.Jedis#ttl(String)
      */
     private static final int KEY_NEVER_EXPIRED = -1;
     /**
      * used to check the result of {@link redis.clients.jedis.Jedis#ttl(String)}
      * this value represents a key does not exists
+     *
+     * @see redis.clients.jedis.Jedis#ttl(String)
      */
     private static final int KEY_NOT_EXISTS = -2;
 
     /**
      * used by {@link redis.RedisTool#handleData(List)} to determine whether to use multi-thread mode or not
+     *
+     * @see redis.RedisTool#handleData(List)
      */
     private static final int MAX_NUM_PER_THREAD = 10000;
 
@@ -357,6 +363,7 @@ public class RedisTool implements AutoCloseable {
      * recalculate items handled per thread, to make sure thead number will not exceeds {@link redis.RedisTool#MAX_THREAD_NUM}
      *
      * @param totalItems total items
+     * @see redis.RedisTool#MAX_THREAD_NUM
      */
     private void handleGiganticSize(int totalItems) {
         threadNum = MAX_THREAD_NUM;
@@ -470,6 +477,8 @@ public class RedisTool implements AutoCloseable {
 
     /**
      * Used by {@link redis.RedisTool#handleData} in multi-thread mode, transfer partial data to target Redis
+     *
+     * @see redis.RedisTool#handleData
      */
     private final class SubTask implements Runnable {
 
