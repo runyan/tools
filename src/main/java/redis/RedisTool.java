@@ -476,9 +476,9 @@ public class RedisTool implements AutoCloseable {
     }
 
     /**
-     * Used by {@link redis.RedisTool#handleData} in multi-thread mode, transfer partial data to target Redis
+     * Used by {@link redis.RedisTool#handleData(List)} in multi-thread mode, transfer partial data to target Redis
      *
-     * @see redis.RedisTool#handleData
+     * @see redis.RedisTool#handleData(List)
      */
     private final class SubTask implements Runnable {
 
