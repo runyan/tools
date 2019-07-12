@@ -86,8 +86,14 @@ public class RedisTool implements AutoCloseable {
      */
     private final Jedis targetJedis;
 
+    /**
+     * list contains keys failed to transfer to target
+     */
     private final CopyOnWriteArrayList<String> failedKeyList = new CopyOnWriteArrayList<>();
 
+    /**
+     * max retry times
+     */
     private static final int MAX_RETRY_TIMES = 3;
 
     public RedisTool(RedisConfig srcRedisConfig, RedisConfig targetRedisConfig) {
@@ -290,11 +296,19 @@ public class RedisTool implements AutoCloseable {
         }
     }
 
+    /**
+     * retry to transfer data
+     */
     private void retry() {
         List<String> failedKeys = new ArrayList<>(failedKeyList);
         doRetry(failedKeys);
     }
 
+    /**
+     * do the retry operation
+     *
+     * @param failedKeys failed keys to retry to transfer
+     */
     private void doRetry(List<String> failedKeys) {
         if(Objects.isNull(failedKeys) || failedKeys.isEmpty()) {
             log.warn("empty keys, no need to retry");
@@ -306,6 +320,12 @@ public class RedisTool implements AutoCloseable {
         log.info(msg);
     }
 
+    /**
+     * retry using single thread
+     *
+     * @param key key to retry to transfer
+     * @return {@code true} if transfer data successfully within {@link redis.RedisTool#MAX_RETRY_TIMES}
+     */
     private boolean singleThreadRetry(String key) {
         int retries = 0;
         while (retries < MAX_RETRY_TIMES) {
@@ -321,6 +341,12 @@ public class RedisTool implements AutoCloseable {
         return retries < MAX_RETRY_TIMES;
     }
 
+    /**
+     * retry using multi-thread
+     *
+     * @param keys keys to retry to transfer
+     * @return {@code true} if transfer data successfully within {@link redis.RedisTool#MAX_RETRY_TIMES}
+     */
     private boolean multiThreadRetry(List<String> keys) {
         int failedKeyNum = keys.size();
         int retries = 0;
@@ -527,6 +553,14 @@ public class RedisTool implements AutoCloseable {
         return currentTime + ttl;
     }
 
+    /**
+     * Do add data to redis
+     *
+     * @param key key to add
+     * @param sourceJedis source Redis
+     * @param targetJedis target Redis
+     * @param threadName name of the thread
+     */
     private void addDataToRedis(String key, Jedis sourceJedis, Jedis targetJedis, String threadName) {
         if(!targetJedis.exists(key)) {
             String type = sourceJedis.type(key);
@@ -592,6 +626,9 @@ public class RedisTool implements AutoCloseable {
         }
     }
 
+    /**
+     * used to retry transfer data
+     */
     private class RetryTask implements Callable<List<String>> {
 
         private List<String> retryFailedKeyList;
