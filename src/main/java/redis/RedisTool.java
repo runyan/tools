@@ -601,22 +601,31 @@ public class RedisTool implements AutoCloseable {
 
         RetryTask(List<String> failedKeyList) {
             this.failedKeyList = failedKeyList;
+            this.retryFailedKeyList = new ArrayList<>();
             srcJedis = srcJedisPool.getResource();
             targetJedis = targetJedisPool.getResource();
-            this.retryFailedKeyList = new ArrayList<>();
+            srcJedis.connect();
+            targetJedis.connect();
         }
 
         @Override
         public List<String> call()  {
             String threadName = Thread.currentThread().getName();
-            for(String key : failedKeyList) {
-                try {
-                    addDataToRedis(key, srcJedis, targetJedis, threadName);
-                    totalNum.getAndIncrement();
-                } catch (Exception e) {
-                    retryFailedKeyList.add(key);
-                    log.error("error while retrying, thread name: {}, key: {}", threadName, key);
+            try {
+                for(String key : failedKeyList) {
+                    try {
+                        addDataToRedis(key, srcJedis, targetJedis, threadName);
+                        totalNum.getAndIncrement();
+                    } catch (Exception e) {
+                        retryFailedKeyList.add(key);
+                        log.error("error while retrying, thread name: {}, key: {}", threadName, key);
+                    }
                 }
+            } finally {
+                targetJedis.disconnect();
+                targetJedis.close();
+                srcJedis.disconnect();
+                srcJedis.close();
             }
             return retryFailedKeyList;
         }
