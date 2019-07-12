@@ -570,6 +570,7 @@ public class RedisTool implements AutoCloseable {
                 while (keyItor.hasNext()) {
                     key = keyItor.next();
                     addDataToRedis(key, sourceJedis, targetJedis, threadName);
+                    totalNum.getAndIncrement();
                     keyItor.remove();
                 }
             } catch (Exception e) {
@@ -609,6 +610,7 @@ public class RedisTool implements AutoCloseable {
             for(String key : failedKeyList) {
                 try {
                     addDataToRedis(key, srcJedis, targetJedis, threadName);
+                    totalNum.getAndIncrement();
                 } catch (Exception e) {
                     retryFailedKeyList.add(key);
                     log.error("error while retrying, thread name: {}, key: {}", threadName, key);
