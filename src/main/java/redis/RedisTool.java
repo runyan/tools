@@ -296,6 +296,10 @@ public class RedisTool implements AutoCloseable {
     }
 
     private void doRetry(List<String> failedKeys) {
+        if(Objects.isNull(failedKeys) || failedKeys.isEmpty()) {
+            log.warn("empty keys, no need to retry");
+            return ;
+        }
         int keyNum = failedKeys.size();
         boolean retrySuccess = keyNum == 1 ? singleThreadRetry(failedKeys.get(0)) : multiThreadRetry(failedKeys);
         String msg = retrySuccess ? "retry success" : "retry failed after " + MAX_RETRY_TIMES + " times";
@@ -319,9 +323,6 @@ public class RedisTool implements AutoCloseable {
 
     private boolean multiThreadRetry(List<String> keys) {
         int failedKeyNum = keys.size();
-        if(failedKeyNum == 0) {
-            return true;
-        }
         int retries = 0;
         int targetPageNum = 5;
         int itemForOneThread = failedKeyNum / targetPageNum + 4;
@@ -350,6 +351,7 @@ public class RedisTool implements AutoCloseable {
             if(needToRetryKeys.isEmpty()) {
                 break;
             }
+            itemForOneThread = needToRetryKeys.size() / targetPageNum + 4;
             retries++;
         }
         executorService.shutdown();
