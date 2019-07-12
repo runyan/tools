@@ -34,18 +34,18 @@ public class RedisTool implements AutoCloseable {
     private static final int DEFAULT_DATABASE = 0;
 
     /**
-     * used to check the result of {@link redis.clients.jedis.Jedis#ttl}
+     * used to check the result of {@link redis.clients.jedis.Jedis#ttl(String)}
      * this value represents a key which never expired
      */
     private static final int KEY_NEVER_EXPIRED = -1;
     /**
-     * used to check the result of {@link redis.clients.jedis.Jedis#ttl}
+     * used to check the result of {@link redis.clients.jedis.Jedis#ttl(String)}
      * this value represents a key does not exists
      */
     private static final int KEY_NOT_EXISTS = -2;
 
     /**
-     * used by {@link redis.RedisTool#handleData} to determine whether to use multi-thread mode or not
+     * used by {@link redis.RedisTool#handleData(List)} to determine whether to use multi-thread mode or not
      */
     private static final int MAX_NUM_PER_THREAD = 10000;
 
