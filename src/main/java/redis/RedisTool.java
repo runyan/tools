@@ -13,6 +13,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A tool to transfer data from source Redis to target Redis
+ * Compatible with redis 2.8.X, 3.x.x, and above.
+ * There are still couple of new functionalities added Redis 5 missing in Jedis like Streams.
+ *
+ * see Jedis's documentation for more Information
+ * @see <a href="https://github.com/xetorthio/jedis">Jedis on Github</a>
  *
  * @author yanrun
  **/
@@ -258,7 +263,7 @@ public class RedisTool implements AutoCloseable {
      *
      * @param key Redis key
      * @param ttl time to live
-     * @return should continue parse this key
+     * @return {@code true} this key should be parsed
      */
     private boolean handleTimeToLive(String key, long ttl) {
         boolean shouldContinue = true;
