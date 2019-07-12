@@ -12,7 +12,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * A tool to transfer data from a source Redis to a target Redis
+ * A tool to transfer data from source Redis to target Redis
  *
  * @author yanrun
  **/
