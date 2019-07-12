@@ -97,6 +97,16 @@ public class RedisTool implements AutoCloseable {
      */
     private final Jedis targetJedis;
 
+    /**
+     * list contains keys failed to transfer to target
+     */
+    private final CopyOnWriteArrayList<String> failedKeyList = new CopyOnWriteArrayList<>();
+
+    /**
+     * max retry times
+     */
+    private static final int MAX_RETRY_TIMES = 3;
+
     public RedisTool(RedisConfig srcRedisConfig, RedisConfig targetRedisConfig) {
         if(Objects.isNull(srcRedisConfig)) {
             throw new NullPointerException("Source Redis config cannot be null");
@@ -222,7 +232,7 @@ public class RedisTool implements AutoCloseable {
         if(targetJedis.exists(key) && shouldDeleteOnFind) {
             targetJedis.del(key);
         }
-        addData(key, type, srcJedis, targetJedis);
+        doAddData(key, type, srcJedis, targetJedis);
         if(ttl != KEY_NEVER_EXPIRED) {
             targetJedis.expireAt(key, calculateUnixTime(ttl));
         }
@@ -288,9 +298,101 @@ public class RedisTool implements AutoCloseable {
         log.info("num of keys: {}", totalItems);
         if(totalItems > MAX_NUM_PER_THREAD) {
             useMultiThread(keyList, totalItems);
+
+        } else {
+            useSingleThread(keyList);
+        }
+        if(!failedKeyList.isEmpty()) {
+            retry();
+        }
+    }
+
+    /**
+     * retry to transfer data
+     */
+    private void retry() {
+        List<String> failedKeys = new ArrayList<>(failedKeyList);
+        doRetry(failedKeys);
+    }
+
+    /**
+     * do the retry operation
+     *
+     * @param failedKeys failed keys to retry to transfer
+     */
+    private void doRetry(List<String> failedKeys) {
+        if(Objects.isNull(failedKeys) || failedKeys.isEmpty()) {
+            log.warn("empty keys, no need to retry");
             return ;
         }
-        useSingleThread(keyList);
+        int keyNum = failedKeys.size();
+        boolean retrySuccess = keyNum == 1 ? singleThreadRetry(failedKeys.get(0)) : multiThreadRetry(failedKeys);
+        String msg = retrySuccess ? "retry success" : "retry failed after " + MAX_RETRY_TIMES + " times";
+        log.info(msg);
+    }
+
+    /**
+     * retry using single thread
+     *
+     * @param key key to retry to transfer
+     * @return {@code true} if transfer data successfully within {@link redis.RedisTool#MAX_RETRY_TIMES}
+     */
+    private boolean singleThreadRetry(String key) {
+        int retries = 0;
+        while (retries < MAX_RETRY_TIMES) {
+            log.info("retry {} times", retries);
+            try {
+                addDataToRedis(key, srcJedis, targetJedis, Thread.currentThread().getName());
+                break;
+            } catch (Exception e) {
+                log.error("error while retrying: exception = {}", e);
+            }
+            retries++;
+        }
+        return retries < MAX_RETRY_TIMES;
+    }
+
+    /**
+     * retry using multi-thread
+     *
+     * @param keys keys to retry to transfer
+     * @return {@code true} if transfer data successfully within {@link redis.RedisTool#MAX_RETRY_TIMES}
+     */
+    private boolean multiThreadRetry(List<String> keys) {
+        int failedKeyNum = keys.size();
+        int retries = 0;
+        int targetPageNum = 5;
+        int itemForOneThread = failedKeyNum / targetPageNum + 4;
+        int endIndex;
+        List<String> keysPerThread;
+        ExecutorService executorService = Executors.newFixedThreadPool(targetPageNum);
+        Future<List<String>> retryFailed;
+        List<String> retryFailedKeys;
+        List<String> needToRetryKeys = new ArrayList<>();
+        while (retries < MAX_RETRY_TIMES) {
+            log.info("retry {} times", retries);
+            for(int i = 0; i < targetPageNum; i++) {
+                endIndex = (i + 1) * itemForOneThread;
+                endIndex = endIndex > failedKeyNum ? failedKeyNum : endIndex;
+                keysPerThread = keys.subList(i * itemForOneThread, endIndex);
+                retryFailed = executorService.submit(new RetryTask(keysPerThread));
+                try {
+                    retryFailedKeys = retryFailed.get();
+                    if(!retryFailedKeys.isEmpty()) {
+                        needToRetryKeys.addAll(retryFailedKeys);
+                    }
+                } catch (InterruptedException | ExecutionException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if(needToRetryKeys.isEmpty()) {
+                break;
+            }
+            itemForOneThread = needToRetryKeys.size() / targetPageNum + 4;
+            retries++;
+        }
+        executorService.shutdown();
+        return retries < MAX_RETRY_TIMES;
     }
 
     /**
@@ -304,27 +406,10 @@ public class RedisTool implements AutoCloseable {
             return;
         }
         log.info("using single thread transfer");
-        long ttl;
-        boolean shouldContinue;
-        String type;
         int num = 0;
+        String threadName = Thread.currentThread().getName();
         for(String key : keyList) {
-            if(!targetJedis.exists(key)) {
-                type = srcJedis.type(key);
-                type = type.toLowerCase();
-                ttl = srcJedis.ttl(key);
-                shouldContinue = handleTimeToLive(key, ttl);
-                if(!shouldContinue) {
-                    continue;
-                }
-                addData(key, type, srcJedis, targetJedis);
-                if(ttl > 0) {
-                    targetJedis.expireAt(key, calculateUnixTime(ttl));
-                }
-                num++;
-            } else {
-                log.info("key: {} already exists", key);
-            }
+            addDataToRedis(key, srcJedis, targetJedis, threadName);
         }
         log.info("Num of data added: {}", num);
     }
@@ -383,7 +468,7 @@ public class RedisTool implements AutoCloseable {
      * @param srcJedis source Redis
      * @param targetJedis target Redis
      */
-    private void addData(String key, String type, Jedis srcJedis, Jedis targetJedis) {
+    private void doAddData(String key, String type, Jedis srcJedis, Jedis targetJedis) {
         if(Objects.isNull(key) || key.isEmpty()) {
             throw new NullPointerException("empty key");
         }
@@ -481,7 +566,31 @@ public class RedisTool implements AutoCloseable {
     }
 
     /**
-     * Used by {@link redis.RedisTool#handleData(List)} in multi-thread mode, transfer partial data to target Redis
+     * Do add data to redis
+     *
+     * @param key key to add
+     * @param sourceJedis source Redis
+     * @param targetJedis target Redis
+     * @param threadName name of the thread
+     */
+    private void addDataToRedis(String key, Jedis sourceJedis, Jedis targetJedis, String threadName) {
+        if(!targetJedis.exists(key)) {
+            String type = sourceJedis.type(key);
+            long ttl = sourceJedis.ttl(key.trim());
+            if(!handleTimeToLive(key, ttl)) {
+                return;
+            }
+            doAddData(key, type, sourceJedis, targetJedis);
+            log.info("{} added key: {}", threadName, key);
+            if(ttl > 0) {
+                targetJedis.expireAt(key, calculateUnixTime(ttl));
+            }
+        } else {
+            log.info("{} already exists", key);
+        }
+    }
+    /**
+     * Used by {@link redis.RedisTool#handleData} in multi-thread mode, transfer partial data to target Redis
      *
      * @see redis.RedisTool#handleData(List)
      */
@@ -506,28 +615,17 @@ public class RedisTool implements AutoCloseable {
             try {
                 sourceJedis.connect();
                 targetJedis.connect();
-                String type;
-                long ttl;
-                for(String key : keyList) {
-                    if(!targetJedis.exists(key)) {
-                        type = sourceJedis.type(key);
-                        ttl = sourceJedis.ttl(key.trim());
-                        if(!handleTimeToLive(key, ttl)) {
-                            continue;
-                        }
-                        addData(key, type, sourceJedis, targetJedis);
-                        log.info("{} added key: {}", threadName, key);
-                        if(ttl > 0) {
-                            targetJedis.expireAt(key, calculateUnixTime(ttl));
-                        }
-                        numOfAdded++;
-                        totalNum.getAndIncrement();
-                    } else {
-                        log.info("{} already exists", key);
-                    }
+                Iterator<String> keyItor = keyList.iterator();
+                String key;
+                while (keyItor.hasNext()) {
+                    key = keyItor.next();
+                    addDataToRedis(key, sourceJedis, targetJedis, threadName);
+                    totalNum.getAndIncrement();
+                    keyItor.remove();
                 }
             } catch (Exception e) {
                 log.error("exception while adding data, thread: {}, exception: {}", threadName, e);
+                failedKeyList.addAll(keyList);
             } finally {
                 countDownLatch.countDown();
                 log.info("Thread: {}, number of data added: {}", threadName, numOfAdded);
@@ -539,6 +637,48 @@ public class RedisTool implements AutoCloseable {
         private void closeJedisConnections() {
             closeJedis(targetJedis);
             closeJedis(sourceJedis);
+        }
+    }
+
+    /**
+     * used to retry transfer data
+     */
+    private class RetryTask implements Callable<List<String>> {
+
+        private List<String> retryFailedKeyList;
+        private List<String> failedKeyList;
+        private Jedis srcJedis;
+        private Jedis targetJedis;
+
+        RetryTask(List<String> failedKeyList) {
+            this.failedKeyList = failedKeyList;
+            this.retryFailedKeyList = new ArrayList<>();
+            srcJedis = srcJedisPool.getResource();
+            targetJedis = targetJedisPool.getResource();
+            srcJedis.connect();
+            targetJedis.connect();
+        }
+
+        @Override
+        public List<String> call()  {
+            String threadName = Thread.currentThread().getName();
+            try {
+                for(String key : failedKeyList) {
+                    try {
+                        addDataToRedis(key, srcJedis, targetJedis, threadName);
+                        totalNum.getAndIncrement();
+                    } catch (Exception e) {
+                        retryFailedKeyList.add(key);
+                        log.error("error while retrying, thread name: {}, key: {}", threadName, key);
+                    }
+                }
+            } finally {
+                targetJedis.disconnect();
+                targetJedis.close();
+                srcJedis.disconnect();
+                srcJedis.close();
+            }
+            return retryFailedKeyList;
         }
     }
 
