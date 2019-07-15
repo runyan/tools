@@ -359,6 +359,14 @@ public class RedisTool implements AutoCloseable {
         return retries < MAX_RETRY_TIMES;
     }
 
+    /**
+     * calculate end index for {@link redis.RedisTool#useMultiThread(List, int)} and {@link redis.RedisTool#multiThreadRetry(List)}
+     * to split origin key list
+     *
+     * @param totalItems total number of items in the key list
+     * @param endIndex origin end index
+     * @return calculated end index
+     */
     private int getEndIndex(int totalItems, int endIndex) {
         return endIndex > totalItems ? totalItems : endIndex;
     }
@@ -514,6 +522,7 @@ public class RedisTool implements AutoCloseable {
             default:
                 throw new IllegalStateException("unsupported type: " + type);
         }
+        totalNum.getAndIncrement();
     }
 
     /**
@@ -612,7 +621,6 @@ public class RedisTool implements AutoCloseable {
         private CountDownLatch countDownLatch;
         private Jedis sourceJedis;
         private Jedis targetJedis;
-        private int numOfAdded = 0;
         private List<String> successKeys;
 
         SubTask(List<String> keyList, CountDownLatch countDownLatch) {
@@ -632,15 +640,12 @@ public class RedisTool implements AutoCloseable {
             try {
                 for (String key : keyList) {
                     addDataToRedis(key, sourceJedis, targetJedis, threadName);
-                    numOfAdded++;
-                    totalNum.getAndIncrement();
                     successKeys.add(key);
                 }
             } catch (Exception e) {
                 log.error("exception while adding data, thread: {}, exception: {}", threadName, e);
             } finally {
                 countDownLatch.countDown();
-                log.info("Thread: {}, number of data added: {}", threadName, numOfAdded);
                 log.info("{} countDownlatch: {}", threadName, countDownLatch.getCount());
                 keyList.removeAll(successKeys);
                 failedKeyList.addAll(keyList);
@@ -681,7 +686,6 @@ public class RedisTool implements AutoCloseable {
                 for(String key : failedKeyList) {
                     try {
                         addDataToRedis(key, srcJedis, targetJedis, threadName);
-                        totalNum.getAndIncrement();
                     } catch (Exception e) {
                         retryFailedKeyList.add(key);
                         log.error("error while retrying, thread name: {}, key: {}", threadName, key);
