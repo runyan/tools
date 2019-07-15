@@ -107,6 +107,12 @@ public class RedisTool implements AutoCloseable {
      */
     private static final int MAX_RETRY_TIMES = 3;
 
+    /**
+     * retry lock
+     * @see redis.RedisTool#multiThreadRetry(List)
+     */
+    private static final Object RETRY_LOCK_OBJ = new Object();
+
     public RedisTool(RedisConfig srcRedisConfig, RedisConfig targetRedisConfig) {
         if(Objects.isNull(srcRedisConfig)) {
             throw new NullPointerException("Source Redis config cannot be null");
@@ -368,7 +374,7 @@ public class RedisTool implements AutoCloseable {
         ExecutorService executorService = Executors.newFixedThreadPool(targetPageNum);
         Future<List<String>> retryFailed;
         List<String> retryFailedKeys;
-        List<String> needToRetryKeys = new ArrayList<>();
+        List<String> needToRetryKeys = new ArrayList<>(failedKeyNum);
         while (retries < MAX_RETRY_TIMES) {
             log.info("retry {} times", retries);
             for(int i = 0; i < targetPageNum; i++) {
@@ -379,7 +385,9 @@ public class RedisTool implements AutoCloseable {
                 try {
                     retryFailedKeys = retryFailed.get();
                     if(!retryFailedKeys.isEmpty()) {
-                        needToRetryKeys.addAll(retryFailedKeys);
+                        synchronized (RETRY_LOCK_OBJ) {
+                            needToRetryKeys.addAll(retryFailedKeys);
+                        }
                     }
                 } catch (InterruptedException | ExecutionException e) {
                     Thread.currentThread().interrupt();
