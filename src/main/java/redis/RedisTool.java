@@ -10,6 +10,7 @@ import redis.clients.jedis.ScanResult;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
  * A tool to transfer data from source Redis to target Redis
@@ -358,6 +359,10 @@ public class RedisTool implements AutoCloseable {
         return retries < MAX_RETRY_TIMES;
     }
 
+    private int getEndIndex(int totalItems, int endIndex) {
+        return endIndex > totalItems ? totalItems : endIndex;
+    }
+
     /**
      * retry using multi-thread
      *
@@ -378,8 +383,7 @@ public class RedisTool implements AutoCloseable {
         while (retries < MAX_RETRY_TIMES) {
             log.info("retry {} times", retries);
             for(int i = 0; i < targetPageNum; i++) {
-                endIndex = (i + 1) * itemForOneThread;
-                endIndex = endIndex > failedKeyNum ? failedKeyNum : endIndex;
+                endIndex = getEndIndex(failedKeyNum, (i + 1) * itemForOneThread);
                 keysPerThread = keys.subList(i * itemForOneThread, endIndex);
                 retryFailed = executorService.submit(new RetryTask(keysPerThread));
                 try {
@@ -418,6 +422,7 @@ public class RedisTool implements AutoCloseable {
         String threadName = Thread.currentThread().getName();
         for(String key : keyList) {
             addDataToRedis(key, srcJedis, targetJedis, threadName);
+            num++;
         }
         log.info("Num of data added: {}", num);
     }
@@ -442,8 +447,7 @@ public class RedisTool implements AutoCloseable {
         ExecutorService executorService = Executors.newFixedThreadPool(threadNum);
         CountDownLatch countDownLatch = new CountDownLatch(threadNum);
         for(int i = 0; i < threadNum; i++) {
-            endIndex = (i + 1) * itemPerThread;
-            endIndex = endIndex > totalItems ? totalItems : endIndex;
+            endIndex = getEndIndex(totalItems, (i + 1) * itemPerThread);
             subList = keyList.subList(i * itemPerThread, endIndex);
             executorService.submit(new SubTask(subList, countDownLatch));
         }
@@ -608,36 +612,38 @@ public class RedisTool implements AutoCloseable {
         private CountDownLatch countDownLatch;
         private Jedis sourceJedis;
         private Jedis targetJedis;
+        private int numOfAdded = 0;
+        private List<String> successKeys;
 
         SubTask(List<String> keyList, CountDownLatch countDownLatch) {
-            this.keyList = keyList;
+            this.keyList = keyList.stream().filter(Objects::nonNull).collect(Collectors.toList());
+            this.keyList = Collections.synchronizedList(this.keyList);
             this.countDownLatch = countDownLatch;
             sourceJedis = srcJedisPool.getResource();
             targetJedis = targetJedisPool.getResource();
+            successKeys = Collections.synchronizedList(new ArrayList<>());
         }
 
         @Override
         public void run() {
             String threadName = Thread.currentThread().getName();
-            int numOfAdded = 0;
+            sourceJedis.connect();
+            targetJedis.connect();
             try {
-                sourceJedis.connect();
-                targetJedis.connect();
-                Iterator<String> keyItor = keyList.iterator();
-                String key;
-                while (keyItor.hasNext()) {
-                    key = keyItor.next();
+                for (String key : keyList) {
                     addDataToRedis(key, sourceJedis, targetJedis, threadName);
+                    numOfAdded++;
                     totalNum.getAndIncrement();
-                    keyItor.remove();
+                    successKeys.add(key);
                 }
             } catch (Exception e) {
                 log.error("exception while adding data, thread: {}, exception: {}", threadName, e);
-                failedKeyList.addAll(keyList);
             } finally {
                 countDownLatch.countDown();
                 log.info("Thread: {}, number of data added: {}", threadName, numOfAdded);
                 log.info("{} countDownlatch: {}", threadName, countDownLatch.getCount());
+                keyList.removeAll(successKeys);
+                failedKeyList.addAll(keyList);
                 closeJedisConnections();
             }
         }
@@ -659,8 +665,9 @@ public class RedisTool implements AutoCloseable {
         private Jedis targetJedis;
 
         RetryTask(List<String> failedKeyList) {
-            this.failedKeyList = failedKeyList;
-            this.retryFailedKeyList = new ArrayList<>();
+            this.failedKeyList = failedKeyList.stream().filter(Objects::nonNull).collect(Collectors.toList());
+            this.failedKeyList = Collections.synchronizedList(this.failedKeyList);
+            this.retryFailedKeyList = Collections.synchronizedList(new ArrayList<>());
             srcJedis = srcJedisPool.getResource();
             targetJedis = targetJedisPool.getResource();
             srcJedis.connect();
