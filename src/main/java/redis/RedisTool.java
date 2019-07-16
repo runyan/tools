@@ -7,6 +7,8 @@ import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.ScanParams;
 import redis.clients.jedis.ScanResult;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -111,6 +113,17 @@ public class RedisTool implements AutoCloseable {
     private static final int MAX_RETRY_TIMES = 3;
 
     /**
+     * list contains keys and values for string type Redis data for batch add
+     * @see Jedis#mset(String...)
+     */
+    private final List<String> batchAddStringList;
+    /**
+     * map contains keys and hash values for hash type Redis data for batch add
+     * @see Jedis#hmset(String, Map)
+     */
+    private final Map<String, Map<String, String>> batchAddHashMap;
+
+    /**
      * retry lock
      * @see redis.RedisTool#multiThreadRetry(List)
      */
@@ -123,6 +136,8 @@ public class RedisTool implements AutoCloseable {
         targetJedisPool = initJedisPool(targetRedisConfig);
         srcJedis = srcJedisPool.getResource();
         targetJedis = targetJedisPool.getResource();
+        batchAddStringList = Collections.synchronizedList(new ArrayList<>(10));
+        batchAddHashMap = new ConcurrentHashMap<>(16);
     }
 
     /**
@@ -308,9 +323,14 @@ public class RedisTool implements AutoCloseable {
         log.info("num of keys: {}", totalItems);
         if(totalItems > MAX_NUM_PER_THREAD) {
             useMultiThread(keyList, totalItems);
-
         } else {
             useSingleThread(keyList);
+        }
+        if(!Util.isEmptyCollection(batchAddStringList)) {
+            targetJedis.mset(collectionToArray(batchAddStringList));
+        }
+        if(!batchAddHashMap.isEmpty()) {
+            batchAddHashMap.forEach(targetJedis::hmset);
         }
         if(!failedKeyList.isEmpty()) {
             retry();
@@ -495,7 +515,8 @@ public class RedisTool implements AutoCloseable {
         key = key.trim();
         switch (type) {
             case "string":
-                targetJedis.set(key, srcJedis.get(key));
+                batchAddStringList.add(key);
+                batchAddStringList.add(srcJedis.get(key));
                 break;
             case "hash":
                 long keyLen = srcJedis.hlen(key);
@@ -518,7 +539,7 @@ public class RedisTool implements AutoCloseable {
                         cursor = scanResult.getCursor();
                     } while (!"0".equalsIgnoreCase(cursor));
                 } else {
-                    targetJedis.hset(key, srcJedis.hgetAll(key));
+                    batchAddHashMap.put(key, srcJedis.hgetAll(key));
                 }
                 break;
             case "list":
@@ -591,7 +612,7 @@ public class RedisTool implements AutoCloseable {
      * @return Unix timestamp when the data should expired
      */
     private long calculateUnixTime(long ttl) {
-        long currentTime = System.currentTimeMillis() / 1000;
+        long currentTime = LocalDateTime.now().toEpochSecond(ZoneOffset.ofHours(8));
         return currentTime + ttl;
     }
 
