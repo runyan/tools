@@ -557,6 +557,18 @@ public class RedisTool implements AutoCloseable {
                 throw new IllegalStateException("unsupported type: " + type);
         }
         totalNum.getAndIncrement();
+        int maxSize = 100000 * 2;
+        if(batchAddStringList.size() >= maxSize) {
+            targetJedis.mset(collectionToArray(batchAddStringList));
+            batchAddStringList.clear();
+        }
+        if(batchAddHashMap.size() >= maxSize) {
+            Set<Map.Entry<String, Map<String, String>>> entrySet = batchAddHashMap.entrySet();
+            for (Map.Entry<String, Map<String, String>> entry : entrySet) {
+                targetJedis.hmset(entry.getKey(), entry.getValue());
+            }
+            batchAddHashMap.clear();
+        }
     }
 
     /**

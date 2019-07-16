@@ -5,7 +5,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Utils
+ * Useful util
  *
  * @author yanrun
  **/
@@ -16,7 +16,7 @@ class Util {
     }
 
     /**
-     * Check is the given string is null or empty, a NullpointerException will be thrown is the string is null or empty
+     * Check is the given string is null or empty, a NullPointerException will be thrown is the string is null or empty
      *
      * @param str string to check
      * @param strName name of the string variable
